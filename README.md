@@ -194,12 +194,35 @@ Uludağ lezzetlerini tanıtan modern, statik üretilen web platformu. **Astro** 
 
 ---
 
+## 🛤 Journey · Yolculuk
+
+GitHub maceram **Şubat 2017**'de başladı; o günden bugüne geçtiğim ana duraklar:
+
+| Yıl · Year | Kilometre Taşı · Milestone |
+|---|---|
+| **2017** · 🌱 | GitHub'a katılım · Joined GitHub (Feb 7, 2017) |
+| **2019** · ⚙️ | İlk PowerShell projeleri — Azure bağlantı & SQL araçları (`GitHubMS`) · First PowerShell work |
+| **2023** · 🐍 | Python ekosistemine geçiş — script koleksiyonu (`python`) açıldı · Pivoted to Python |
+| **2024** · 🏢 | **ITWise** dönemi — kurumsal güvenlik, AI ve otomasyon yolculuğu başladı · ITWise enterprise era |
+| **2025** · 🛡 | `sec-wise` — AI destekli zafiyet platformu, ISO 27001/22301 uyum hattı · AI vulnerability platform |
+| **2026** · 🤖 | `itwise-finance` çoklu-ajan UBL-TR fatura sistemi · `FILE_ACTIVITY` public yayın · Multi-agent invoice system & FILE_ACTIVITY open-sourced |
+
+---
+
 ## 📊 GitHub Analytics
 
 <div align="center">
 
-<img height="180em" src="https://github-readme-stats.vercel.app/api?username=deepdarbe&show_icons=true&theme=tokyonight&hide_border=true&count_private=true&include_all_commits=true" alt="GitHub Stats" />
-<img height="180em" src="https://github-readme-stats.vercel.app/api/top-langs/?username=deepdarbe&layout=compact&theme=tokyonight&hide_border=true&langs_count=8" alt="Top Languages" />
+<p>
+  <img src="https://img.shields.io/github/followers/deepdarbe?label=Followers&style=for-the-badge&color=58A6FF&logo=github" alt="followers" />
+  <img src="https://img.shields.io/github/stars/deepdarbe?label=Total%20Stars&style=for-the-badge&color=58A6FF&logo=github" alt="stars" />
+  <img src="https://img.shields.io/badge/Repositories-14-58A6FF?style=for-the-badge&logo=github" alt="repos" />
+  <img src="https://img.shields.io/badge/Since-Feb%202017-58A6FF?style=for-the-badge&logo=github" alt="since" />
+</p>
+
+<br/>
+
+<img src="https://github-readme-activity-graph.vercel.app/graph?username=deepdarbe&theme=tokyo-night&hide_border=true&area=true&custom_title=Contribution%20Activity%20%C2%B7%20Katk%C4%B1%20Grafi%C4%9Fi" alt="Activity Graph" />
 
 <br/>
 
