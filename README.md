@@ -203,7 +203,7 @@ Uludağ lezzetlerini tanıtan modern, statik üretilen web platformu. **Astro** 
 
 <br/>
 
-<img src="https://github-readme-streak-stats.herokuapp.com/?user=deepdarbe&theme=tokyonight&hide_border=true" alt="Streak" />
+<img src="https://streak-stats.demolab.com?user=deepdarbe&theme=tokyonight&hide_border=true" alt="Streak" />
 
 <br/>
 
@@ -217,7 +217,11 @@ Uludağ lezzetlerini tanıtan modern, statik üretilen web platformu. **Astro** 
 
 <div align="center">
 
-![Snake animation](https://raw.githubusercontent.com/deepdarbe/GitHubMS/output/github-contribution-grid-snake.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/deepdarbe/GitHubMS/output/github-contribution-grid-snake-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/deepdarbe/GitHubMS/output/github-contribution-grid-snake.svg" />
+  <img alt="Snake animation" src="https://raw.githubusercontent.com/deepdarbe/GitHubMS/output/github-contribution-grid-snake.svg" />
+</picture>
 
 <sub>Günlük GitHub Actions ile üretilir · Generated daily via GitHub Actions</sub>
 
