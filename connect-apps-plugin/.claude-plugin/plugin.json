@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "connect-apps-plugin",
+  "displayName": "Connect Apps",
+  "version": "0.1.0",
+  "description": "Slash commands and an agent for connecting to and working with the cloud apps used in this repo: Azure, Microsoft 365, and GitHub.",
+  "author": {
+    "name": "deepdarbe"
+  },
+  "repository": "https://github.com/deepdarbe/githubms",
+  "license": "MIT",
+  "keywords": [
+    "azure",
+    "microsoft-365",
+    "github",
+    "powershell",
+    "connect",
+    "cloud"
+  ]
+}
