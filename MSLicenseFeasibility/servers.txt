@@ -1,0 +1,9 @@
+# MSLicenseFeasibility - sunucu listesi
+# Her satira bir sunucu adi (NetBIOS veya FQDN) yazin.
+# '#' ile baslayan satirlar yorum olarak atlanir.
+# Bu dosya yalnizca -ComputerListFile / [2] Liste ile modunda kullanilir.
+#
+# Ornek:
+# DC01.contoso.local
+# SQL01
+# RDS01.contoso.local

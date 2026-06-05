@@ -1,0 +1,6 @@
+# Windows araci: betikler CRLF ile checkout edilsin (cmd.exe icin guvenli)
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.psd1 text eol=crlf
+*.txt  text eol=crlf
+*.md   text eol=crlf

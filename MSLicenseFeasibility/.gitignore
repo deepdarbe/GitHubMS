@@ -1,0 +1,7 @@
+# Uretilen raporlar (commit edilmez)
+output/*.html
+output/*.csv
+output/*.json
+
+# output klasoru korunsun
+!output/.gitkeep
