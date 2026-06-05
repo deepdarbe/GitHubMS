@@ -103,6 +103,9 @@ Bunun için tüm modüller tek dosyada toplanmış
 PowerShell 5.1+ (domaine üye, yönetici makinesi):
 
 ```powershell
+# Eski Windows / PowerShell 5.1'de GitHub'a bağlanmak için önce TLS 1.2'yi açın:
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'
+
 # Parametreli (ÖNERİLEN) — belleğe indirip çalıştırır:
 & ([scriptblock]::Create((irm 'RAW_URL'))) -Demo -OpenReport     # önizleme
 & ([scriptblock]::Create((irm 'RAW_URL'))) -OpenReport           # gerçek tarama
@@ -110,8 +113,7 @@ PowerShell 5.1+ (domaine üye, yönetici makinesi):
 # iex ile (parametre geçilmez; varsayılan = gerçek AD taraması):
 iex (irm 'RAW_URL')
 
-# wget/iwr ile indir, sonra çalıştır (eski sistemlerde TLS 1.2 gerekebilir):
-[Net.ServicePointManager]::SecurityProtocol = 'Tls12'
+# wget/iwr ile indir, sonra çalıştır:
 iwr 'RAW_URL' -OutFile "$env:TEMP\MSLF.ps1"
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\MSLF.ps1" -OpenReport
 ```
