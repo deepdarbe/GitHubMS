@@ -87,6 +87,63 @@ rapor üretip açar.
 
 ---
 
+## Tek dosya ile uzaktan çalıştırma (iex / iwr / wget)
+
+Çok dosyalı sürüm `lib\*.ps1` dosyalarını dot-source ettiği için
+`iex (irm ...)` ile **doğrudan çalışmaz** (`$PSScriptRoot` bellekte boştur).
+Bunun için tüm modüller tek dosyada toplanmış
+**`MSLicenseFeasibility-Standalone.ps1`** üretilir (`build-standalone.ps1` ile).
+
+> ⚠️ **Güvenlik:** İnternetten indirip belleğe alarak betik çalıştırmak (iex),
+> o betiğin tüm kodunu çalıştırır. Yalnızca **güvendiğiniz** kaynaktan ve
+> tercihen **commit SHA'sına sabitlenmiş** URL'den çalıştırın. Aşağıdaki
+> örnekler reponun **public** olduğunu varsayar; repo private ise en alttaki
+> nota bakın.
+
+PowerShell 5.1+ (domaine üye, yönetici makinesi):
+
+```powershell
+# Parametreli (ÖNERİLEN) — belleğe indirip çalıştırır:
+& ([scriptblock]::Create((irm 'RAW_URL'))) -Demo -OpenReport     # önizleme
+& ([scriptblock]::Create((irm 'RAW_URL'))) -OpenReport           # gerçek tarama
+
+# iex ile (parametre geçilmez; varsayılan = gerçek AD taraması):
+iex (irm 'RAW_URL')
+
+# wget/iwr ile indir, sonra çalıştır (eski sistemlerde TLS 1.2 gerekebilir):
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'
+iwr 'RAW_URL' -OutFile "$env:TEMP\MSLF.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\MSLF.ps1" -OpenReport
+```
+
+**`RAW_URL`** (bu geliştirme dalı):
+```
+https://raw.githubusercontent.com/deepdarbe/GitHubMS/claude/determined-dijkstra-hBkQB/MSLicenseFeasibility/MSLicenseFeasibility-Standalone.ps1
+```
+`master`'a merge sonrası:
+```
+https://raw.githubusercontent.com/deepdarbe/GitHubMS/master/MSLicenseFeasibility/MSLicenseFeasibility-Standalone.ps1
+```
+
+- Bellekten (iex) çalıştırıldığında çıktılar **bulunduğunuz dizindeki**
+  `output\` klasörüne yazılır.
+- **Private repo** ise ham URL bir PAT (token) ister:
+  ```powershell
+  $h = @{ Authorization = 'token <PAT>' }
+  & ([scriptblock]::Create((irm -Headers $h 'RAW_URL'))) -Demo
+  ```
+  Alternatif: dosyayı tarayıcıdan indirin ya da çok dosyalı klasörü kopyalayıp
+  `Run-Feasibility.cmd` kullanın.
+
+### Standalone'u yeniden üretme
+Kaynak (`lib\*.ps1` veya ana script) değiştiğinde:
+```powershell
+.\build-standalone.ps1
+```
+`MSLicenseFeasibility-Standalone.ps1` **otomatik üretilir — elle düzenlemeyin.**
+
+---
+
 ## Çıktılar
 
 `output\` klasörüne zaman damgalı olarak yazılır:
@@ -137,14 +194,16 @@ rapor üretip açar.
 
 ```
 MSLicenseFeasibility/
-├── Run-Feasibility.cmd          # Click-to-run launcher (menü)
-├── MSLicenseFeasibility.ps1     # Ana orkestratör (parametreler, akış)
-├── servers.txt                  # (opsiyonel) manuel sunucu listesi
+├── Run-Feasibility.cmd                 # Click-to-run launcher (menü)
+├── MSLicenseFeasibility.ps1            # Ana orkestratör (çok dosyalı giriş)
+├── MSLicenseFeasibility-Standalone.ps1 # Tek dosya (iex/wget için; ÜRETİLİR)
+├── build-standalone.ps1                # Standalone üreticisi
+├── servers.txt                         # (opsiyonel) manuel sunucu listesi
 ├── lib/
-│   ├── LicensingEngine.ps1      # Lisans hesaplama motoru (kurallar)
-│   ├── Collectors.ps1           # AD + CIM/WMI veri toplama (agentless)
-│   └── ReportWriter.ps1         # HTML + CSV rapor üretimi
-├── output/                      # Üretilen raporlar (gitignore)
+│   ├── LicensingEngine.ps1             # Lisans hesaplama motoru (kurallar)
+│   ├── Collectors.ps1                  # AD + CIM/WMI veri toplama (agentless)
+│   └── ReportWriter.ps1                # HTML + CSV rapor üretimi
+├── output/                             # Üretilen raporlar (gitignore)
 └── PSScriptAnalyzerSettings.psd1
 ```
 

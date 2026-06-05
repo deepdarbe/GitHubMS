@@ -71,15 +71,25 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
-if (-not $root) { $root = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-# --- Modulleri yukle (dot-source) ---
-# Ic ice Join-Path: hem Windows PowerShell 5.1 hem cross-platform uyumlu.
-$libDir = Join-Path $root 'lib'
-. (Join-Path $libDir 'LicensingEngine.ps1')
-. (Join-Path $libDir 'Collectors.ps1')
-. (Join-Path $libDir 'ReportWriter.ps1')
+#region MODULE-LOAD
+# Bu blok yalnizca cok-dosyali kullanimda gereklidir. Standalone surum
+# (build-standalone.ps1) bu bolgeyi kaldirip modulleri tek dosyaya gomer;
+# boylece arac iex/irm/wget ile uzaktan (bellekten) calistirilabilir.
+$__libRoot = $PSScriptRoot
+if (-not $__libRoot) { $__libRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+$__libDir = Join-Path $__libRoot 'lib'
+. (Join-Path $__libDir 'LicensingEngine.ps1')
+. (Join-Path $__libDir 'Collectors.ps1')
+. (Join-Path $__libDir 'ReportWriter.ps1')
+#endregion MODULE-LOAD
+
+# === MAIN BODY ===
+# Calisma kokunu coz: dosyadan calisirken script klasoru; iex/bellekten
+# calisirken (PSScriptRoot bos) mevcut calisma dizini kullanilir.
+$root = $PSScriptRoot
+if (-not $root -and $MyInvocation.MyCommand.Path) { $root = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $root) { $root = (Get-Location).Path }
 
 if (-not $OutputDir) { $OutputDir = Join-Path $root 'output' }
 if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
