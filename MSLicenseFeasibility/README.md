@@ -84,6 +84,35 @@ rapor üretip açar.
 | `-PerHostTimeoutSec <n>` | Sunucu başına CIM zaman aşımı (sn) | 20 |
 | `-NoHtml` | Yalnızca CSV üret | — |
 | `-OpenReport` | Rapor oluşunca tarayıcıda aç | — |
+| `-PhysicalHostsFile <yol>` | Fiziksel host core'ları (CSV: `PhysicalCores` kolonu **veya** her satırda bir sayı). Verilirse **host-bazlı** Windows (Datacenter/Standard) hesabı yapılır | — |
+| `-NoFailover` | Varsayılan failover/HA varsayılır; VM'ler tek host'a sabitse bunu verin | (failover) |
+| `-RdsUserCount <n>` | RDS kullanıcı sayısını elle ver (yoksa AD kullanıcı sayısı) | 0 (oto) |
+| `-RdsDeviceCount <n>` | RDS cihaz sayısını elle ver | 0 (oto) |
+| `-SqlUserCount <n>` | SQL'e erişen kullanıcı sayısı (Server+CAL vs Per-Core kararı) | 0 (oto) |
+
+### Host-bazlı Windows lisanslama (VM'ler için)
+
+Sanal sunucular Windows Server kuralında **fiziksel host'tan** lisanslanır
+(Datacenter = sınırsız VM; Standard = lisans seti başına 2 VM). Bu hesabı
+yaptırmak için fiziksel host core'larını `-PhysicalHostsFile` ile verin:
+
+```csv
+HostName,Sockets,PhysicalCores
+HOST-01,2,24
+HOST-02,2,24
+```
+
+```powershell
+.\MSLicenseFeasibility.ps1 -PhysicalHostsFile .\hosts.csv -RdsUserCount 30 -SqlUserCount 50 -OpenReport
+```
+
+Rapor ve **Lisans İhtiyaç Matrisi** (CSV + HTML), Datacenter core sayısını,
+Standard alternatifini ve CAL/SQL ihtiyacını otomatik çıkarır.
+
+> **Not (VM kuralları):** Araç sanal sunucularda SQL'i tüm vCPU üzerinden
+> (OSE başına min 4 core) ve Windows'u host-bazlı hesaplar — VM'leri fiziksel
+> sunucu gibi saymaz. `Software Assurance` yoksa per-VM Windows lisanslama
+> geçerli değildir; host-bazlı (Datacenter) kullanılır.
 
 ---
 
@@ -150,8 +179,9 @@ Kaynak (`lib\*.ps1` veya ana script) değiştiğinde:
 
 `output\` klasörüne zaman damgalı olarak yazılır:
 
-- **`LisansFizibilite_<tarih>.html`** — Yönetici özeti, kart göstergeleri ve
-  detay tablolarıyla tek dosyalık HTML rapor.
+- **`LisansFizibilite_<tarih>.html`** — Yönetici özeti, **Lisans İhtiyaç
+  Matrisi**, host-bazlı Windows ve detay tablolarıyla tek dosyalık HTML rapor.
+- **`LisansMatrisi_<tarih>.csv`** — Ne kadar/ne gerekiyor matrisi (satın-alma listesi).
 - **`Servers_<tarih>.csv`** — Sunucu bazında OS / soket / core / edition.
 - **`SQL_<tarih>.csv`** — SQL instance / edition / lisans modeli.
 - **`Summary_<tarih>.csv`** — Tek satırlık genel özet (satın alma tablosu için).
@@ -201,6 +231,7 @@ MSLicenseFeasibility/
 ├── MSLicenseFeasibility-Standalone.ps1 # Tek dosya (iex/wget için; ÜRETİLİR)
 ├── build-standalone.ps1                # Standalone üreticisi
 ├── servers.txt                         # (opsiyonel) manuel sunucu listesi
+├── hosts.csv                           # (opsiyonel) fiziksel host core'lari (ornek)
 ├── lib/
 │   ├── LicensingEngine.ps1             # Lisans hesaplama motoru (kurallar)
 │   ├── Collectors.ps1                  # AD + CIM/WMI veri toplama (agentless)

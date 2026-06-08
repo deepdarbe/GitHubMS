@@ -67,7 +67,14 @@ param(
     [string]$OutputDir,
     [int]$PerHostTimeoutSec = 20,
     [switch]$NoHtml,
-    [switch]$OpenReport
+    [switch]$OpenReport,
+    # --- Host-bazli Windows lisanslama (sanal sunucular fiziksel host'tan lisanslanir) ---
+    [string]$PhysicalHostsFile,   # CSV (PhysicalCores kolonu) ya da her satirda bir core sayisi
+    [switch]$NoFailover,          # Varsayilan failover/HA varsayilir; pinned ise bunu verin
+    # --- Bilinen sayilarla override (yoksa AD sayilari kullanilir) ---
+    [int]$RdsUserCount = 0,
+    [int]$RdsDeviceCount = 0,
+    [int]$SqlUserCount = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -181,9 +188,29 @@ else {
 # ----------------------------------------------------------------------
 # 3) Ozet + Rapor uret
 # ----------------------------------------------------------------------
+
+# Fiziksel host core'larini oku (verilmisse) -> host-bazli Windows hesabi
+$physicalHostCores = @()
+if ($PhysicalHostsFile) {
+    if (-not (Test-Path $PhysicalHostsFile)) { throw "Host dosyasi bulunamadi: $PhysicalHostsFile" }
+    $rawHost = @(Get-Content -Path $PhysicalHostsFile | Where-Object { $_ -and -not $_.TrimStart().StartsWith('#') })
+    $hasHeader = (($rawHost | Select-Object -First 1) -match 'PhysicalCores')
+    if ($hasHeader) {
+        $physicalHostCores = @(Import-Csv -Path $PhysicalHostsFile |
+            Where-Object { "$($_.PhysicalCores)" -match '^\s*\d+\s*$' } |
+            ForEach-Object { [int]$_.PhysicalCores })
+    } else {
+        $physicalHostCores = @($rawHost | ForEach-Object { [int]($_.Trim()) })
+    }
+    Write-Host ("[i] {0} fiziksel host okundu, toplam {1} core." -f $physicalHostCores.Count, (($physicalHostCores | Measure-Object -Sum).Sum)) -ForegroundColor Green
+}
+
 Write-Host ''
 Write-Host '[i] Lisans hesabi yapiliyor...' -ForegroundColor Green
-$summary = Get-FeasibilitySummary -Inventory $inventory
+$summary = Get-FeasibilitySummary -Inventory $inventory `
+    -PhysicalHostCores $physicalHostCores -NeedFailover (-not $NoFailover) `
+    -RdsUserCountOverride $RdsUserCount -RdsDeviceCountOverride $RdsDeviceCount `
+    -SqlUserCountOverride $SqlUserCount
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
 $csvFiles = Export-FeasibilityCsv -Summary $summary -Directory $OutputDir -Stamp $stamp
@@ -197,19 +224,16 @@ if (-not $NoHtml) {
 # 4) Konsol ozeti
 # ----------------------------------------------------------------------
 Write-Host ''
-Write-Host '  ---------------- LISANS IHTIYACI OZETI ----------------' -ForegroundColor Cyan
-Write-Host ("   Toplam / erisilen sunucu      : {0} / {1}" -f $inventory.Domain.ServerCount, $summary.ReachableCount)
-Write-Host ("   Fiziksel lisanslanabilir core : {0} core  ({1} x 2-core paket)" -f $summary.PhysicalCoreTotal, $summary.PhysicalPackTotal)
-Write-Host ("   Sanal sunucu core (host bazli): {0} core" -f $summary.VirtualCoreTotal)
-Write-Host ("   Windows Server CAL tavsiyesi  : {0} x {1}" -f $summary.Cal.RecommendedType, $summary.Cal.RecommendedCount)
-Write-Host ("     (etkin kullanici: {0} / is istasyonu: {1})" -f $inventory.Domain.EnabledUserCount, $inventory.Domain.WorkstationCount)
-if ($summary.Rds) {
-    Write-Host ("   RDS CAL ({0})            : {1} x {2}" -f $summary.RdsMode, $summary.Rds.RecommendedType, $summary.Rds.RecommendedCount)
-} else {
-    Write-Host '   RDS                           : Session Host bulunamadi'
+Write-Host '  ---------------- LISANS IHTIYAC MATRISI ----------------' -ForegroundColor Cyan
+foreach ($m in $summary.Matrix) {
+    $col = if ($m.Priority -eq 'Zorunlu') { 'White' } else { 'DarkGray' }
+    Write-Host ("   {0,-40} {1,5}  {2}" -f $m.Item, $m.Qty, $m.Unit) -ForegroundColor $col
 }
-Write-Host ("   Ucretli SQL instance          : {0}" -f @($summary.SqlPaid).Count)
-Write-Host '  -------------------------------------------------------' -ForegroundColor Cyan
+Write-Host '  --------------------------------------------------------' -ForegroundColor Cyan
+Write-Host ("   Toplam/erisilen sunucu: {0}/{1}    Ucretli SQL instance: {2}" -f $inventory.Domain.ServerCount, $summary.ReachableCount, @($summary.SqlPaid).Count) -ForegroundColor DarkGray
+if ($summary.HostBased) {
+    Write-Host ("   Windows host-bazli  -> Datacenter: {0} core ({1}x 2-core) | Standard(pinned): {2} core" -f $summary.HostBased.Datacenter_Cores, $summary.HostBased.Datacenter_Packs2, $summary.HostBased.Standard_Cores_Pinned) -ForegroundColor DarkGray
+}
 Write-Host ''
 Write-Host '[+] Olusturulan dosyalar:' -ForegroundColor Green
 if ($htmlPath) { Write-Host "    HTML : $htmlPath" }

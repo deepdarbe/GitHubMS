@@ -2,6 +2,7 @@
 output/*.html
 output/*.csv
 output/*.json
+output/*.xlsx
 
 # output klasoru korunsun
 !output/.gitkeep

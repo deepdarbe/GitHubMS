@@ -67,7 +67,14 @@ param(
     [string]$OutputDir,
     [int]$PerHostTimeoutSec = 20,
     [switch]$NoHtml,
-    [switch]$OpenReport
+    [switch]$OpenReport,
+    # --- Host-bazli Windows lisanslama (sanal sunucular fiziksel host'tan lisanslanir) ---
+    [string]$PhysicalHostsFile,   # CSV (PhysicalCores kolonu) ya da her satirda bir core sayisi
+    [switch]$NoFailover,          # Varsayilan failover/HA varsayilir; pinned ise bunu verin
+    # --- Bilinen sayilarla override (yoksa AD sayilari kullanilir) ---
+    [int]$RdsUserCount = 0,
+    [int]$RdsDeviceCount = 0,
+    [int]$SqlUserCount = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,10 +92,10 @@ $ErrorActionPreference = 'Stop'
 .DESCRIPTION
     Toplanan envanter verisini alir ve Microsoft'un resmi lisanslama
     kurallarina gore gerekli lisans adetlerini hesaplar:
-      - Windows Server core lisansi (Standard / Datacenter)
+      - Windows Server core lisansi (fiziksel sunucu + host-bazli VM)
       - Windows Server CAL (User / Device)
       - RDS CAL (Per-User / Per-Device)
-      - SQL Server (Core modeli / Server+CAL modeli)
+      - SQL Server (Core modeli / Server+CAL modeli; fiziksel + VM)
 
     Kurallar Microsoft resmi lisanslama rehberlerinden (Windows Server 2022/2025
     ve SQL Server 2022 Licensing Guides, learn.microsoft.com) alinmistir.
@@ -107,16 +114,15 @@ $Script:LicRules = [PSCustomObject]@{
     WS_MinCoresPerServer    = 16    # Sunucu basina minimum core lisansi
     WS_CorePackSize         = 2     # 2-core paketlerle satilir
     WS_StandardVmsPerSet    = 2     # Standard: lisans seti basina 2 OSE/VM
+    WS_MinCoresPerVM        = 8     # Per-VM (SA ile) lisanslamada VM basina min
 
     # SQL Server core-based lisanslama
-    SQL_MinCoresPerProcessor = 4    # Soket basina minimum core lisansi
+    SQL_MinCoresPerProcessor = 4    # Soket basina minimum core lisansi (fiziksel)
     SQL_CorePackSize         = 2    # 2-core paketlerle satilir
-    SQL_MinCoresPerVM        = 4    # VM basina minimum (per-core)
+    SQL_MinCoresPerVM        = 4    # VM/OSE basina minimum (per-core)
     SQL_StandardEngineCoreCap = 24  # SQL Standard motoru: 4 soket veya 24 core'un kucugu
 
     # Standard -> Datacenter gecis esigi (VM yogunluguna gore tavsiye).
-    # Datacenter fiyati ~ Standard'in 8 kati oldugundan kirilma noktasi
-    # genelde host basina ~12-14 VM civarindadir. Yapilandirilabilir.
     DC_RecommendVmThreshold = 14
 }
 
@@ -139,7 +145,6 @@ function Get-CoreLicenseCount {
     if ($Sockets -lt 1)       { $Sockets = 1 }
     if ($PhysicalCores -lt 1) { $PhysicalCores = $Sockets * $MinPerProcessor }
 
-    # Soketler arasi esit dagilim varsayilir (per-soket detay yoksa).
     $coresPerSocket = [math]::Ceiling($PhysicalCores / $Sockets)
     $perSocketLicensed = $Sockets * [math]::Max($coresPerSocket, $MinPerProcessor)
 
@@ -150,12 +155,17 @@ function Get-WindowsServerLicense {
     <#
     .SYNOPSIS
         Tek bir Windows sunucusu icin core lisans ihtiyacini hesaplar.
+    .DESCRIPTION
+        Fiziksel sunucu: 8/soket, 16/sunucu minimumu. VM (IsVirtual): gercek
+        lisanslama HOST bazlidir (asagidaki Get-HostBasedWindowsLicense);
+        per-VM (yalnizca SA/abonelik ile) basis = max(8, vCPU).
     #>
     param(
         [Parameter(Mandatory)][int]$Sockets,
         [Parameter(Mandatory)][int]$PhysicalCores,
-        [int]$GuestVmCount = 0,        # Bu host uzerinde calisan misafir VM sayisi (Hyper-V host ise)
-        [bool]$IsVirtualizationHost = $false
+        [int]$GuestVmCount = 0,
+        [bool]$IsVirtualizationHost = $false,
+        [bool]$IsVirtual = $false
     )
 
     $licensedCores = Get-CoreLicenseCount -Sockets $Sockets -PhysicalCores $PhysicalCores `
@@ -164,8 +174,6 @@ function Get-WindowsServerLicense {
 
     $corePacks2 = [math]::Ceiling($licensedCores / $Script:LicRules.WS_CorePackSize)
 
-    # Standard edition: 2 VM / lisans seti. Daha fazla VM icin tum core'lar
-    # yeniden lisanslanir (stacking). Datacenter: sinirsiz VM.
     $standardSetsNeeded = 1
     $edition = 'Standard'
     $reason  = 'Fiziksel/tek sunucu - Standard yeterli (2 OSE hakki).'
@@ -180,15 +188,84 @@ function Get-WindowsServerLicense {
         }
     }
 
+    # Per-VM (SA gerekli) lisans basis: VM basina min 8 core, vCPU kadar.
+    $perVmCores = if ($IsVirtual) { [math]::Max($Script:LicRules.WS_MinCoresPerVM, $PhysicalCores) } else { $licensedCores }
+    $licensedVia = if ($IsVirtual) { 'Host bazli (Datacenter/Standard) veya SA ile per-VM' } else { 'Fiziksel sunucu (core)' }
+
     return [PSCustomObject]@{
+        IsVirtual             = $IsVirtual
+        LicensedVia           = $licensedVia
         LicensedCores         = $licensedCores
         CorePacks_2Core       = [int]$corePacks2
         CorePacks_16Core      = [int][math]::Ceiling($licensedCores / 16)
+        PerVmLicensableCores  = [int]$perVmCores       # SA ile per-VM senaryosu
+        PerVmPacks_2Core      = [int][math]::Ceiling($perVmCores / 2)
         RecommendedEdition    = $edition
         StandardLicenseSets   = [int]$standardSetsNeeded
-        # Standard secilirse satin alinacak toplam core lisansi (stacking dahil)
         StandardTotalCores    = [int]($licensedCores * $standardSetsNeeded)
         Reason                = $reason
+    }
+}
+
+function Get-HostBasedWindowsLicense {
+    <#
+    .SYNOPSIS
+        Fiziksel host(lar) icin host-bazli Windows Server lisansi (Datacenter / Standard).
+    .DESCRIPTION
+        Sanal sunucular fiziksel host'tan lisanslanir. Datacenter tum fiziksel
+        core'lari bir kez lisanslar -> sinirsiz VM. Standard her lisans setiyle 2 VM
+        (fazlasi icin core'lar yeniden lisanslanir). SA yoksa lisans tasinabilirligi
+        yoktur; failover icin Standard her host'u tam kapsamak zorundadir, bu yuzden
+        Datacenter cok daha ekonomik olur.
+    #>
+    param(
+        [Parameter(Mandatory)][int[]]$HostPhysicalCores,  # her host'un fiziksel core sayisi
+        [int]$GuestVmCount = 0,
+        [bool]$NeedFailover = $true
+    )
+
+    $cores = @($HostPhysicalCores | ForEach-Object { [int]$_ })
+    $hostCount = $cores.Count
+    # Datacenter: her host'un tum fiziksel core'lari (host basina min 16).
+    $dcPerHost = @($cores | ForEach-Object { [math]::Max($_, $Script:LicRules.WS_MinCoresPerServer) })
+    $dcTotal = [int](($dcPerHost | Measure-Object -Sum).Sum)
+
+    # Standard (pinned): VM'ler host'lara esit dagitilir, host basina ceil(vm/2) set.
+    $stdPinned = 0
+    if ($GuestVmCount -gt 0 -and $hostCount -gt 0) {
+        $base = [math]::Floor($GuestVmCount / $hostCount)
+        $rem  = $GuestVmCount % $hostCount
+        for ($i = 0; $i -lt $hostCount; $i++) {
+            $vmsOnHost = $base + $(if ($i -lt $rem) { 1 } else { 0 })
+            if ($vmsOnHost -lt 1) { continue }
+            $sets = [math]::Ceiling($vmsOnHost / $Script:LicRules.WS_StandardVmsPerSet)
+            $stdPinned += $sets * $dcPerHost[$i]
+        }
+    }
+    # Standard (failover): her host TUM VM'leri kapsamali (SA olmadan tasinma yok).
+    $stdFailover = 0
+    if ($GuestVmCount -gt 0) {
+        $setsAll = [math]::Ceiling($GuestVmCount / $Script:LicRules.WS_StandardVmsPerSet)
+        foreach ($hc in $dcPerHost) { $stdFailover += $setsAll * $hc }
+    }
+
+    $reason = if ($NeedFailover) {
+        "Failover/HA senaryosu: Datacenter $dcTotal core ile $hostCount host'taki tum VM'leri + failover'i SINIRSIZ kapsar. Standard ayni failover icin ~$stdFailover core gerektirir (SA yoksa mobility yok)."
+    } else {
+        "Datacenter $dcTotal core ile tum VM'leri sinirsiz kapsar. Standard (pinned, failover yok) ~$stdPinned core - yalnizca VM'ler tek host'a sabitse mantiklidir."
+    }
+
+    return [PSCustomObject]@{
+        HostCount               = $hostCount
+        TotalPhysicalCores      = $dcTotal
+        Datacenter_Cores        = $dcTotal
+        Datacenter_Packs2       = [int][math]::Ceiling($dcTotal / 2)
+        Datacenter_Packs16      = [int][math]::Ceiling($dcTotal / 16)
+        Standard_Cores_Pinned   = [int]$stdPinned
+        Standard_Cores_Failover = [int]$stdFailover
+        NeedFailover            = $NeedFailover
+        Recommended             = 'Datacenter'
+        Reason                  = $reason
     }
 }
 
@@ -197,43 +274,63 @@ function Get-SqlServerLicense {
     .SYNOPSIS
         Tek bir SQL Server instance'i icin lisans ihtiyacini hesaplar.
     .DESCRIPTION
-        Iki model degerlendirilir: Per-Core ve Server+CAL.
-        Server+CAL yalnizca Standard edition icin (yeni anlasmalarda) gecerlidir.
+        Iki model: Per-Core ve Server+CAL (Server+CAL yalnizca Standard, yeni anlasma).
+        VM (IsVirtual) ise per-core TUM vCPU'lari lisanslar (OSE basina min 4);
+        fiziksel ise soket basina min 4 uygulanir. SQL Standard 24 core ile sinirlidir.
     #>
     param(
         [Parameter(Mandatory)][int]$Sockets,
         [Parameter(Mandatory)][int]$PhysicalCores,
         [string]$Edition = 'Standard',
-        [int]$KnownUserOrDeviceCount = 0   # SQL'e erisen bilinen kullanici/cihaz sayisi (Server+CAL icin)
+        [int]$KnownUserOrDeviceCount = 0,
+        [bool]$IsVirtual = $false
     )
 
-    $licensedCores = Get-CoreLicenseCount -Sockets $Sockets -PhysicalCores $PhysicalCores `
-        -MinPerProcessor $Script:LicRules.SQL_MinCoresPerProcessor `
-        -MinPerServer    $Script:LicRules.SQL_MinCoresPerProcessor   # SQL'de sabit sunucu-min yok; soket-min surer
+    if ($IsVirtual) {
+        # VM: OSE'deki TUM sanal cekirdekler lisanslanir, OSE basina min 4 core.
+        # Fiziksel soket-min kurali VM'de gecerli degildir.
+        $licensedCores = [math]::Max($PhysicalCores, $Script:LicRules.SQL_MinCoresPerVM)
+    } else {
+        $licensedCores = Get-CoreLicenseCount -Sockets $Sockets -PhysicalCores $PhysicalCores `
+            -MinPerProcessor $Script:LicRules.SQL_MinCoresPerProcessor `
+            -MinPerServer    $Script:LicRules.SQL_MinCoresPerProcessor
+    }
+
+    # SQL Standard motoru en fazla 24 core kullanir; lisans da bununla sinirli.
+    $capNote = ''
+    if ($Edition -match 'Standard' -and $licensedCores -gt $Script:LicRules.SQL_StandardEngineCoreCap) {
+        $capNote = " (Standard $($Script:LicRules.SQL_StandardEngineCoreCap) core ile sinirli)"
+        $licensedCores = $Script:LicRules.SQL_StandardEngineCoreCap
+    }
 
     $corePacks2 = [math]::Ceiling($licensedCores / $Script:LicRules.SQL_CorePackSize)
 
     $isEnterprise = $Edition -match 'Enterprise'
-    $serverPlusCalAvailable = -not $isEnterprise   # Server+CAL yalnizca Standard (yeni anlasma)
+    $serverPlusCalAvailable = -not $isEnterprise
 
-    # Model tavsiyesi: bilinen/kucuk kullanici sayisi -> Server+CAL; aksi halde Per-Core.
     $recommendedModel = 'Per-Core'
     $reason = 'Enterprise veya yuksek/bilinmeyen kullanici sayisi -> Per-Core model.'
     if ($serverPlusCalAvailable -and $KnownUserOrDeviceCount -gt 0) {
-        # Kaba kiyas: Server+CAL ~ kucuk kullanici sayilarinda avantajli.
-        $recommendedModel = 'Server+CAL'
-        $reason = "Standard edition ve bilinen kullanici/cihaz sayisi ($KnownUserOrDeviceCount) -> Server+CAL degerlendirilmeli."
+        # Kaba kiyas: Per-Core ~ corePacks2 paketi; Server+CAL ~ 1 sunucu + N CAL.
+        # ~65 kullaniciya kadar Server+CAL genelde daha ekonomiktir.
+        if ($KnownUserOrDeviceCount -le 65) {
+            $recommendedModel = 'Server+CAL'
+            $reason = "Standard ve $KnownUserOrDeviceCount kullanici (<=65) -> Server+CAL daha ekonomik (1 sunucu + $KnownUserOrDeviceCount SQL CAL)."
+        } else {
+            $reason = "Standard ancak $KnownUserOrDeviceCount kullanici (>65) -> Per-Core daha ekonomik ($corePacks2 x 2-core paketi, sinirsiz kullanici)."
+        }
     }
 
     return [PSCustomObject]@{
         Edition                = $Edition
+        IsVirtual              = $IsVirtual
         PerCore_LicensedCores  = $licensedCores
         PerCore_Packs_2Core    = [int]$corePacks2
         ServerPlusCalAvailable = $serverPlusCalAvailable
         ServerLicenses         = if ($serverPlusCalAvailable) { 1 } else { 0 }
         SqlCalsNeeded          = if ($serverPlusCalAvailable) { $KnownUserOrDeviceCount } else { 0 }
         RecommendedModel       = $recommendedModel
-        Reason                 = $reason
+        Reason                 = ($reason + $capNote)
     }
 }
 
@@ -241,9 +338,6 @@ function Get-CalRecommendation {
     <#
     .SYNOPSIS
         Windows Server CAL (User vs Device) tavsiyesi.
-    .DESCRIPTION
-        CAL ag genelinde gecerlidir (sunucu basina degil). Kullanici sayisi
-        cihaz sayisindan az ise User CAL, aksi halde Device CAL daha ekonomiktir.
     #>
     param(
         [Parameter(Mandatory)][int]$UserCount,
@@ -253,14 +347,14 @@ function Get-CalRecommendation {
 
     $useUser = $UserCount -le $DeviceCount
     return [PSCustomObject]@{
-        UserCount          = $UserCount
-        DeviceCount        = $DeviceCount
-        RecommendedType    = if ($useUser) { 'User CAL' } else { 'Device CAL' }
-        RecommendedCount   = if ($useUser) { $UserCount } else { $DeviceCount }
-        UserCALs           = $UserCount
-        DeviceCALs         = $DeviceCount
-        VersionNote        = if ($MaxServerVersion) { "CAL surumu >= en yuksek sunucu surumu ($MaxServerVersion) olmalidir." } else { 'CAL surumu, erisilen en yuksek Windows Server surumune esit veya ustu olmalidir.' }
-        Reason             = if ($useUser) { 'Kullanici sayisi <= cihaz sayisi: User CAL daha ekonomik.' } else { 'Cihaz sayisi < kullanici sayisi: Device CAL daha ekonomik (vardiyali/paylasimli cihazlar).' }
+        UserCount        = $UserCount
+        DeviceCount      = $DeviceCount
+        RecommendedType  = if ($useUser) { 'User CAL' } else { 'Device CAL' }
+        RecommendedCount = if ($useUser) { $UserCount } else { $DeviceCount }
+        UserCALs         = $UserCount
+        DeviceCALs       = $DeviceCount
+        VersionNote      = if ($MaxServerVersion) { "CAL surumu >= en yuksek sunucu surumu ($MaxServerVersion) olmalidir." } else { 'CAL surumu, erisilen en yuksek Windows Server surumune esit veya ustu olmalidir.' }
+        Reason           = if ($useUser) { 'Kullanici sayisi <= cihaz sayisi: User CAL daha ekonomik.' } else { 'Cihaz sayisi < kullanici sayisi: Device CAL daha ekonomik (vardiyali/paylasimli cihazlar).' }
     }
 }
 
@@ -272,14 +366,13 @@ function Get-RdsCalRecommendation {
     param(
         [Parameter(Mandatory)][int]$RdsUserCount,
         [Parameter(Mandatory)][int]$RdsDeviceCount,
-        [string]$DetectedMode = 'NotConfigured'   # PerUser | PerDevice | NotConfigured
+        [string]$DetectedMode = 'NotConfigured'
     )
 
     switch ($DetectedMode) {
         'PerUser'   { $type = 'RDS Per-User CAL';   $count = $RdsUserCount;   $reason = 'Sistemde Per-User modu tespit edildi.' }
         'PerDevice' { $type = 'RDS Per-Device CAL'; $count = $RdsDeviceCount; $reason = 'Sistemde Per-Device modu tespit edildi.' }
         default {
-            # Mod yapilandirilmamis: kullanici<=cihaz ise Per-User oner.
             if ($RdsUserCount -le $RdsDeviceCount) { $type = 'RDS Per-User CAL'; $count = $RdsUserCount; $reason = 'Mod yapilandirilmamis; kullanici sayisi az -> Per-User tavsiye.' }
             else { $type = 'RDS Per-Device CAL'; $count = $RdsDeviceCount; $reason = 'Mod yapilandirilmamis; cihaz sayisi az -> Per-Device tavsiye.' }
         }
@@ -727,20 +820,19 @@ function New-DemoInventory {
 # -------- lib/ReportWriter.ps1 --------
 <#
 .SYNOPSIS
-    Rapor uretim katmani (HTML + CSV).
+    Rapor uretim katmani (HTML + CSV + Lisans Ihtiyac Matrisi).
 
 .DESCRIPTION
-    Toplanan envanteri lisans motorundan gecirir, ozetler cikarir ve:
+    Toplanan envanteri lisans motorundan gecirir, ozetler/matris cikarir ve:
       - Kendine yeten (self-contained) bir HTML yonetici raporu
-      - Ham veri icin CSV dosyalari
+      - Ham veri ve ihtiyac matrisi icin CSV dosyalari
     uretir.
 
-    Windows PowerShell 5.1 ile uyumludur (ternary operatoru / System.Web
-    bagimliligi kullanilmaz). Bu dosya MSLicenseFeasibility.ps1 tarafindan
-    dot-source edilir ve LicensingEngine.ps1'in yuklenmis olmasini bekler.
+    Windows PowerShell 5.1 ile uyumludur (ternary / System.Web bagimliligi yok).
+    Bu dosya MSLicenseFeasibility.ps1 tarafindan dot-source edilir ve
+    LicensingEngine.ps1'in yuklenmis olmasini bekler.
 #>
 
-# Basit, bagimsiz HTML encode (System.Web gerektirmez; 5.1 + 7 uyumlu)
 function ConvertTo-HtmlSafe {
     param([object]$Value)
     if ($null -eq $Value) { return '' }
@@ -752,19 +844,32 @@ function ConvertTo-HtmlSafe {
 function Get-FeasibilitySummary {
     <#
     .SYNOPSIS
-        Envanteri lisans motorundan gecirip ozet/aggregate uretir.
+        Envanteri lisans motorundan gecirip ozet/matris uretir.
+    .PARAMETER PhysicalHostCores
+        Fiziksel host(lar)in core sayilari (orn. @(24,24)). Verilirse host-bazli
+        Windows (Datacenter/Standard) hesabi yapilir.
     #>
     param(
-        [Parameter(Mandatory)][PSObject]$Inventory
+        [Parameter(Mandatory)][PSObject]$Inventory,
+        [int[]]$PhysicalHostCores = @(),
+        [bool]$NeedFailover = $true,
+        [int]$RdsUserCountOverride = 0,
+        [int]$RdsDeviceCountOverride = 0,
+        [int]$SqlUserCountOverride = 0
     )
 
     $servers = @($Inventory.Servers)
     $reachable = @($servers | Where-Object { $_.Reachable -and -not $_.CollectionError })
     $winServers = @($reachable | Where-Object { $_.OSCaption -match 'Windows Server' })
 
+    # Kullanici/cihaz sayilari (override > envanter)
+    $sqlUsers   = if ($SqlUserCountOverride -gt 0)    { $SqlUserCountOverride }    else { [int]$Inventory.Domain.EnabledUserCount }
+    $rdsUsers   = if ($RdsUserCountOverride -gt 0)    { $RdsUserCountOverride }    else { [int]$Inventory.Domain.EnabledUserCount }
+    $rdsDevices = if ($RdsDeviceCountOverride -gt 0)  { $RdsDeviceCountOverride }  else { [int]$Inventory.Domain.WorkstationCount }
+
     # --- Windows Server core lisanslama (sunucu basina) ---
     $serverLicRows = foreach ($s in $winServers) {
-        $lic = Get-WindowsServerLicense -Sockets ([int]$s.Sockets) -PhysicalCores ([int]$s.PhysicalCores)
+        $lic = Get-WindowsServerLicense -Sockets ([int]$s.Sockets) -PhysicalCores ([int]$s.PhysicalCores) -IsVirtual:([bool]$s.IsVirtual)
         $edition = if ($s.OSCaption -match 'Datacenter') { 'Datacenter' } else { $lic.RecommendedEdition }
         [PSCustomObject]@{
             ComputerName       = $s.ComputerName
@@ -774,6 +879,7 @@ function Get-FeasibilitySummary {
             PhysicalCores      = $s.PhysicalCores
             LogicalCores       = $s.LogicalCores
             LicensableCores    = $lic.LicensedCores
+            PerVmCores         = $lic.PerVmLicensableCores
             CorePacks_2Core    = $lic.CorePacks_2Core
             RecommendedEdition = $edition
             IsVirtual          = [bool]$s.IsVirtual
@@ -787,13 +893,20 @@ function Get-FeasibilitySummary {
 
     $physCoreTotal = [int](($physical | Measure-Object -Property LicensableCores -Sum).Sum)
     $physPackTotal = [int](($physical | Measure-Object -Property CorePacks_2Core -Sum).Sum)
-    $vmCoreTotal   = [int](($virtual  | Measure-Object -Property LicensableCores -Sum).Sum)
+    $vmCoreTotal   = [int](($virtual  | Measure-Object -Property PhysicalCores -Sum).Sum)
+    $vmPerVmCores  = [int](($virtual  | Measure-Object -Property PerVmCores -Sum).Sum)
+
+    # --- Host-bazli Windows (fiziksel host core'u verilmisse) ---
+    $hostBased = $null
+    if (@($PhysicalHostCores).Count -gt 0) {
+        $hostBased = Get-HostBasedWindowsLicense -HostPhysicalCores $PhysicalHostCores -GuestVmCount ($virtual.Count) -NeedFailover $NeedFailover
+    }
 
     # --- SQL Server lisanslama ---
     $sqlRows = foreach ($s in $reachable) {
         foreach ($inst in @($s.SQLInstances)) {
             $lic = Get-SqlServerLicense -Sockets ([int]$s.Sockets) -PhysicalCores ([int]$s.PhysicalCores) `
-                -Edition ([string]$inst.Edition) -KnownUserOrDeviceCount ([int]$Inventory.Domain.EnabledUserCount)
+                -Edition ([string]$inst.Edition) -KnownUserOrDeviceCount $sqlUsers -IsVirtual:([bool]$s.IsVirtual)
             [PSCustomObject]@{
                 ComputerName     = $s.ComputerName
                 Instance         = $inst.InstanceName
@@ -812,6 +925,20 @@ function Get-FeasibilitySummary {
     $sqlRows = @($sqlRows)
     $sqlPaid = @($sqlRows | Where-Object { $_.Licensable })
 
+    # Ayni OSE/VM'deki birden fazla instance -> tek lisans. Sunucu bazinda topla.
+    $sqlByServer = @($sqlPaid | Group-Object ComputerName | ForEach-Object {
+        $first = $_.Group[0]
+        [PSCustomObject]@{
+            ComputerName   = $_.Name
+            Instances      = (($_.Group | ForEach-Object { $_.Instance }) -join ', ')
+            InstanceCount  = $_.Count
+            PerCore_Packs2 = $first.PerCore_Packs2
+            ServerPlusCAL  = $first.ServerPlusCAL
+        }
+    })
+    $sqlServerLicenses    = @($sqlByServer | Where-Object { $_.ServerPlusCAL }).Count
+    $sqlPerCorePacksTotal = [int](($sqlByServer | Measure-Object -Property PerCore_Packs2 -Sum).Sum)
+
     # --- Windows Server CAL ---
     $cal = Get-CalRecommendation -UserCount ([int]$Inventory.Domain.EnabledUserCount) `
         -DeviceCount ([int]$Inventory.Domain.WorkstationCount)
@@ -823,9 +950,8 @@ function Get-FeasibilitySummary {
     $detected = @($rdsHosts | Where-Object { $_.RDSLicensingMode -in 'PerUser', 'PerDevice' } | Select-Object -First 1)
     if ($detected) { $rdsMode = $detected.RDSLicensingMode }
     $rds = $null
-    if ($rdsHosts.Count -gt 0) {
-        $rds = Get-RdsCalRecommendation -RdsUserCount ([int]$Inventory.Domain.EnabledUserCount) `
-            -RdsDeviceCount ([int]$Inventory.Domain.WorkstationCount) -DetectedMode $rdsMode
+    if ($rdsHosts.Count -gt 0 -or $RdsUserCountOverride -gt 0) {
+        $rds = Get-RdsCalRecommendation -RdsUserCount $rdsUsers -RdsDeviceCount $rdsDevices -DetectedMode $rdsMode
     }
     $installedCalPacks = foreach ($h in $rdsLicServers) { foreach ($p in @($h.RDSCalPacks)) { $p } }
     $installedCalPacks = @($installedCalPacks)
@@ -834,25 +960,50 @@ function Get-FeasibilitySummary {
     $osDistribution = $winServers | Group-Object OSCaption | Sort-Object Count -Descending |
         ForEach-Object { [PSCustomObject]@{ OS = $_.Name; Count = $_.Count } }
 
-    return [PSCustomObject]@{
-        Inventory            = $Inventory
-        ServerLicenseRows    = $serverLicRows
-        PhysicalServers      = $physical
-        VirtualServers       = $virtual
-        PhysicalCoreTotal    = $physCoreTotal
-        PhysicalPackTotal    = $physPackTotal
-        VirtualCoreTotal     = $vmCoreTotal
-        SqlRows              = $sqlRows
-        SqlPaid              = $sqlPaid
-        Cal                  = $cal
-        Rds                  = $rds
-        RdsHosts             = $rdsHosts
-        RdsMode              = $rdsMode
-        InstalledRdsCalPacks = $installedCalPacks
-        OsDistribution       = @($osDistribution)
-        ReachableCount       = $reachable.Count
-        UnreachableServers   = @($servers | Where-Object { -not $_.Reachable -or $_.CollectionError })
+    # --- LISANS IHTIYAC MATRISI ---
+    $matrix = New-Object System.Collections.Generic.List[object]
+    if ($hostBased) {
+        $matrix.Add([PSCustomObject]@{ Item = 'Windows Server Datacenter (core)'; Qty = $hostBased.Datacenter_Cores; Unit = 'core'; Priority = 'Zorunlu'; Note = "$($hostBased.HostCount) fiziksel host, host-bazli. Tum VM + failover sinirsiz. = $($hostBased.Datacenter_Packs2)x 2-core paketi." })
+    } else {
+        $matrix.Add([PSCustomObject]@{ Item = 'Windows Server (fiziksel core)'; Qty = $physCoreTotal; Unit = 'core'; Priority = 'Zorunlu'; Note = "Fiziksel sunucular. VM'ler HOST bazli lisanslanir; -PhysicalHostsFile verirseniz Datacenter hesabi yapilir." })
     }
+    $matrix.Add([PSCustomObject]@{ Item = "Windows Server $($cal.RecommendedType)"; Qty = $cal.RecommendedCount; Unit = 'CAL'; Priority = 'Zorunlu'; Note = $cal.Reason })
+    if ($rds) {
+        $matrix.Add([PSCustomObject]@{ Item = $rds.RecommendedType; Qty = $rds.RecommendedCount; Unit = 'CAL'; Priority = 'Zorunlu'; Note = "RD Session Host kullanicilari. Windows CAL'a EK." })
+    }
+    if ($sqlServerLicenses -gt 0) {
+        $matrix.Add([PSCustomObject]@{ Item = 'SQL Server Standard - sunucu lisansi'; Qty = $sqlServerLicenses; Unit = 'sunucu lisansi'; Priority = 'Zorunlu'; Note = "OSE/VM basina 1 (tum instance dahil). Server+CAL modeli." })
+        $matrix.Add([PSCustomObject]@{ Item = 'SQL Server CAL'; Qty = $sqlUsers; Unit = 'CAL'; Priority = 'Zorunlu'; Note = "SQL'e erisen kullanici/cihaz (multiplexing dahil). Windows CAL'dan ayri." })
+        $matrix.Add([PSCustomObject]@{ Item = '(Alternatif) SQL Server Standard (core)'; Qty = $sqlPerCorePacksTotal; Unit = '2-core paketi'; Priority = 'Secenek'; Note = "Server+CAL yerine Per-Core: sinirsiz kullanici. ~65+ kullanici icin avantajli." })
+    }
+
+    $ret = [ordered]@{}
+    $ret['Inventory']            = $Inventory
+    $ret['ServerLicenseRows']    = $serverLicRows
+    $ret['PhysicalServers']      = $physical
+    $ret['VirtualServers']       = $virtual
+    $ret['PhysicalCoreTotal']    = $physCoreTotal
+    $ret['PhysicalPackTotal']    = $physPackTotal
+    $ret['VirtualCoreTotal']     = $vmCoreTotal
+    $ret['VirtualPerVmCoreTotal']= $vmPerVmCores
+    $ret['HostBased']            = $hostBased
+    $ret['SqlRows']              = $sqlRows
+    $ret['SqlPaid']              = $sqlPaid
+    $ret['SqlByServer']          = $sqlByServer
+    $ret['SqlServerLicenses']    = $sqlServerLicenses
+    $ret['SqlPerCorePacksTotal'] = $sqlPerCorePacksTotal
+    $ret['SqlUsers']             = $sqlUsers
+    $ret['Cal']                  = $cal
+    $ret['Rds']                  = $rds
+    $ret['RdsHosts']             = $rdsHosts
+    $ret['RdsMode']              = $rdsMode
+    $ret['RdsUsers']             = $rdsUsers
+    $ret['InstalledRdsCalPacks'] = $installedCalPacks
+    $ret['OsDistribution']       = @($osDistribution)
+    $ret['ReachableCount']       = $reachable.Count
+    $ret['UnreachableServers']   = @($servers | Where-Object { (-not $_.Reachable) -or $_.CollectionError })
+    $ret['Matrix']               = $matrix.ToArray()
+    return [pscustomobject]$ret
 }
 
 function New-HtmlReport {
@@ -882,10 +1033,13 @@ function New-HtmlReport {
   th,td { text-align:left; padding:9px 11px; border-bottom:1px solid #24304f; }
   th { background:#1c2949; color:#cdd9f5; font-weight:600; }
   tr:hover td { background:#1a2540; }
+  .matrix th { background:#14532d; }
+  .matrix td.qty { font-weight:700; color:#86efac; text-align:center; font-size:15px; }
   .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
   .pill.phys { background:#1e3a8a; color:#bfdbfe; } .pill.vm { background:#374151; color:#d1d5db; }
   .pill.dc { background:#3730a3; color:#c7d2fe; }
   .pill.ent { background:#7c2d12; color:#fed7aa; } .pill.paid { background:#854d0e; color:#fde68a; } .pill.free { background:#14532d; color:#bbf7d0; }
+  .pill.zor { background:#14532d; color:#bbf7d0; } .pill.sec { background:#854d0e; color:#fde68a; }
   .rec { background:#0c1f3a; border:1px solid #1e40af; border-radius:8px; padding:14px 16px; margin:10px 0; }
   .rec b { color:#93c5fd; }
   .disc { background:#3b1d1d; border:1px solid #7f1d1d; border-radius:8px; padding:12px 16px; color:#fecaca; font-size:12px; margin:16px 0; }
@@ -899,63 +1053,73 @@ function New-HtmlReport {
     [void]$sb.Append("<h1>Microsoft Lisans Fizibilite Raporu</h1>")
     [void]$sb.Append("<div class='sub'>Olusturulma: $now &nbsp;|&nbsp; Domain DC: $(ConvertTo-HtmlSafe ($dom.DomainControllers -join ', ')) &nbsp;|&nbsp; Eski nesne esigi: $($dom.StaleDays) gun</div>")
 
-    # Disclaimer
     [void]$sb.Append("<div class='disc'><b>UYARI:</b> Bu rapor bir FIZIBILITE/tahmin aracidir. Lisanslama kurallari Microsoft resmi rehberlerine dayanir ancak nihai lisans ihtiyaci; Software Assurance, sozlesme tipi, sanallastirma haklari ve host&#8594;VM eslesmesi gibi etkenlere gore degisir. Satin alma oncesi yetkili bir Microsoft lisans uzmaniyla teyit edin.</div>")
 
+    # --- LISANS IHTIYAC MATRISI ---
+    if (@($Summary.Matrix).Count -gt 0) {
+        [void]$sb.Append("<h2>Lisans Ihtiyac Matrisi</h2>")
+        [void]$sb.Append("<table class='matrix'><tr><th>Urun / Lisans</th><th>Adet</th><th>Birim</th><th>Oncelik</th><th>Aciklama</th></tr>")
+        foreach ($m in $Summary.Matrix) {
+            $pc = if ($m.Priority -eq 'Zorunlu') { 'zor' } else { 'sec' }
+            [void]$sb.Append("<tr><td><b>$(ConvertTo-HtmlSafe $m.Item)</b></td><td class='qty'>$($m.Qty)</td><td>$(ConvertTo-HtmlSafe $m.Unit)</td><td><span class='pill $pc'>$(ConvertTo-HtmlSafe $m.Priority)</span></td><td class='muted'>$(ConvertTo-HtmlSafe $m.Note)</td></tr>")
+        }
+        [void]$sb.Append("</table>")
+    }
+
     # Executive cards
-    [void]$sb.Append("<div class='cards'>")
+    [void]$sb.Append("<h2>Genel Bakis</h2><div class='cards'>")
     [void]$sb.Append("<div class='card accent'><div class='n'>$($dom.ServerCount)</div><div class='l'>Toplam Sunucu (AD)</div></div>")
     [void]$sb.Append("<div class='card'><div class='n'>$($Summary.ReachableCount)</div><div class='l'>Erisilen / Taranan Sunucu</div></div>")
-    [void]$sb.Append("<div class='card good'><div class='n'>$($Summary.PhysicalCoreTotal)</div><div class='l'>Fiziksel Lisanslanabilir Core (WS)</div></div>")
+    if ($Summary.HostBased) {
+        [void]$sb.Append("<div class='card good'><div class='n'>$($Summary.HostBased.Datacenter_Cores)</div><div class='l'>Datacenter Core (host bazli)</div></div>")
+    } else {
+        [void]$sb.Append("<div class='card good'><div class='n'>$($Summary.PhysicalCoreTotal)</div><div class='l'>Fiziksel Lisanslanabilir Core</div></div>")
+    }
     [void]$sb.Append("<div class='card'><div class='n'>$($dom.EnabledUserCount)</div><div class='l'>Etkin Kullanici (CAL)</div></div>")
-    [void]$sb.Append("<div class='card'><div class='n'>$($dom.WorkstationCount)</div><div class='l'>Is Istasyonu / PC (CAL)</div></div>")
     [void]$sb.Append("<div class='card warn'><div class='n'>$(@($Summary.SqlPaid).Count)</div><div class='l'>Ucretli SQL Instance</div></div>")
     [void]$sb.Append("</div>")
 
-    # --- Recommendations summary ---
-    [void]$sb.Append("<h2>Lisans Ihtiyaci Ozeti (Tahmini)</h2>")
-    [void]$sb.Append("<div class='rec'><b>Windows Server (Core):</b> Fiziksel sunucularda toplam <b>$($Summary.PhysicalCoreTotal)</b> lisanslanabilir core (= <b>$($Summary.PhysicalPackTotal)</b> adet 2-core paketi). Min. kurallar: soket basina 8, sunucu basina 16 core. Sanal sunuculardaki toplam $($Summary.VirtualCoreTotal) core, host bazli lisanslanir (asagidaki nota bakin).</div>")
-    [void]$sb.Append("<div class='rec'><b>Windows Server CAL:</b> Tavsiye = <b>$(ConvertTo-HtmlSafe $Summary.Cal.RecommendedType)</b> &times; <b>$($Summary.Cal.RecommendedCount)</b>. ($($Summary.Cal.UserCALs) kullanici / $($Summary.Cal.DeviceCALs) cihaz). $(ConvertTo-HtmlSafe $Summary.Cal.Reason) <span class='muted'>$(ConvertTo-HtmlSafe $Summary.Cal.VersionNote)</span></div>")
-    if ($Summary.Rds) {
-        $packInfo = ''
-        if (@($Summary.InstalledRdsCalPacks).Count -gt 0) {
-            $tot = [int]((@($Summary.InstalledRdsCalPacks) | Measure-Object -Property TotalLicenses -Sum).Sum)
-            $iss = [int]((@($Summary.InstalledRdsCalPacks) | Measure-Object -Property IssuedLicenses -Sum).Sum)
-            $packInfo = " Kurulu RDS CAL havuzu: $iss/$tot kullanimda."
-        }
-        [void]$sb.Append("<div class='rec'><b>RDS CAL:</b> Tespit edilen mod = <b>$(ConvertTo-HtmlSafe $Summary.RdsMode)</b>. Tavsiye = <b>$(ConvertTo-HtmlSafe $Summary.Rds.RecommendedType)</b> &times; <b>$($Summary.Rds.RecommendedCount)</b>. <span class='muted'>$(ConvertTo-HtmlSafe $Summary.Rds.Note)</span>$packInfo</div>")
-    } else {
-        [void]$sb.Append("<div class='rec'><b>RDS CAL:</b> Sistemde RD Session Host rolu tespit edilmedi; RDS CAL gerekmiyor gorunuyor.</div>")
-    }
-    if (@($Summary.SqlPaid).Count -gt 0) {
-        $sqlPackTotal = [int]((@($Summary.SqlPaid) | Measure-Object -Property PerCore_Packs2 -Sum).Sum)
-        [void]$sb.Append("<div class='rec'><b>SQL Server:</b> $(@($Summary.SqlPaid).Count) ucretli instance. Per-Core modelinde toplam ~<b>$sqlPackTotal</b> adet 2-core paketi (min. soket basina 4 core). Standard instance'lar icin az/bilinen kullanici sayisinda Server+CAL modeli degerlendirilebilir.</div>")
-    } else {
-        [void]$sb.Append("<div class='rec'><b>SQL Server:</b> Ucretli SQL instance tespit edilmedi (yalnizca Express/Developer veya hic yok).</div>")
+    # --- Host-based Windows ---
+    if ($Summary.HostBased) {
+        $hb = $Summary.HostBased
+        [void]$sb.Append("<h2>Windows Server - Host Bazli Lisans</h2>")
+        [void]$sb.Append("<div class='rec'><b>Tavsiye: Datacenter</b> = <b>$($hb.Datacenter_Cores)</b> core ($($hb.Datacenter_Packs2)x 2-core paketi), $($hb.HostCount) host. $(ConvertTo-HtmlSafe $hb.Reason)</div>")
+        [void]$sb.Append("<table><tr><th>Senaryo</th><th>Toplam Core</th><th>Sonuc</th></tr>")
+        [void]$sb.Append("<tr><td>Datacenter (onerilen)</td><td><b>$($hb.Datacenter_Cores)</b></td><td>Sinirsiz VM + failover</td></tr>")
+        [void]$sb.Append("<tr><td>Standard (pinned, failover yok)</td><td>$($hb.Standard_Cores_Pinned)</td><td class='muted'>Sadece VM'ler tek host'a sabitse</td></tr>")
+        [void]$sb.Append("<tr><td>Standard (failover ile)</td><td>$($hb.Standard_Cores_Failover)</td><td class='muted'>Onerilmez - Datacenter cok daha ucuz</td></tr>")
+        [void]$sb.Append("</table>")
     }
 
     # --- Windows Server table ---
-    [void]$sb.Append("<h2>Windows Server Envanteri &amp; Core Lisans</h2>")
-    [void]$sb.Append("<table><tr><th>Sunucu</th><th>Isletim Sistemi</th><th>Tur</th><th>Soket</th><th>Fiziksel Core</th><th>Mantiksal</th><th>Lisanslanabilir Core</th><th>2-Core Paket</th><th>Edition</th></tr>")
+    [void]$sb.Append("<h2>Windows Server Envanteri &amp; Core</h2>")
+    [void]$sb.Append("<table><tr><th>Sunucu</th><th>Isletim Sistemi</th><th>Tur</th><th>Soket</th><th>Fiziksel/vCPU</th><th>Per-VM Core</th><th>Edition</th></tr>")
     foreach ($r in $Summary.ServerLicenseRows) {
         $typePill = if ($r.IsVirtual) { "<span class='pill vm'>Sanal</span>" } else { "<span class='pill phys'>Fiziksel</span>" }
         $dcPill = if ($r.IsDC) { " <span class='pill dc'>DC</span>" } else { '' }
-        [void]$sb.Append("<tr><td>$(ConvertTo-HtmlSafe $r.ComputerName)$dcPill</td><td>$(ConvertTo-HtmlSafe $r.OS)</td><td>$typePill</td><td>$($r.Sockets)</td><td>$($r.PhysicalCores)</td><td class='muted'>$($r.LogicalCores)</td><td><b>$($r.LicensableCores)</b></td><td>$($r.CorePacks_2Core)</td><td>$(ConvertTo-HtmlSafe $r.RecommendedEdition)</td></tr>")
+        $pvm = if ($r.IsVirtual) { "$($r.PerVmCores)" } else { '-' }
+        [void]$sb.Append("<tr><td>$(ConvertTo-HtmlSafe $r.ComputerName)$dcPill</td><td>$(ConvertTo-HtmlSafe $r.OS)</td><td>$typePill</td><td>$($r.Sockets)</td><td>$($r.PhysicalCores)</td><td class='muted'>$pvm</td><td>$(ConvertTo-HtmlSafe $r.RecommendedEdition)</td></tr>")
     }
     [void]$sb.Append("</table>")
-    [void]$sb.Append("<div class='sub' style='margin-top:8px'>Not: Sanal sunucularda gosterilen core, atanmis vCPU'dur. Microsoft kurallarinda Windows Server, VM'in uzerinde calistigi <b>fiziksel host'un tum core'lari</b> lisanslanarak (Datacenter = sinirsiz VM, Standard = lisans seti basina 2 VM) lisanslanir. Host&#8594;VM eslesmesi icin hipervizor envanteri (Get-VM / PowerCLI) gerekir.</div>")
+    [void]$sb.Append("<div class='sub' style='margin-top:8px'>Not: Sanal sunucularda 'Fiziksel/vCPU' atanmis vCPU'dur. Windows Server VM'leri <b>fiziksel host'tan</b> lisanslanir (Datacenter=sinirsiz VM, Standard=set basina 2 VM). 'Per-VM Core' yalnizca Software Assurance ile gecerli per-VM senaryosudur (VM basina min 8).</div>")
 
     # --- SQL table ---
     if (@($Summary.SqlRows).Count -gt 0) {
         [void]$sb.Append("<h2>SQL Server Envanteri &amp; Lisans</h2>")
-        [void]$sb.Append("<table><tr><th>Sunucu</th><th>Instance</th><th>Edition</th><th>Surum</th><th>Fiziksel Core</th><th>Per-Core (2-core paket)</th><th>Server+CAL?</th><th>Tavsiye Model</th></tr>")
+        [void]$sb.Append("<table><tr><th>Sunucu</th><th>Instance</th><th>Edition</th><th>Tur</th><th>vCPU/Core</th><th>Per-Core (paket)</th><th>Model</th></tr>")
         foreach ($r in $Summary.SqlRows) {
             $cls = switch ($r.EditionClass) { 'Enterprise' { 'ent' } 'Free' { 'free' } default { 'paid' } }
             $clsLbl = switch ($r.EditionClass) { 'Free' { 'Ucretsiz' } 'Enterprise' { 'Enterprise' } default { 'Ucretli' } }
-            $spc = if ($r.ServerPlusCAL) { 'Evet (Standard)' } else { 'Hayir' }
-            [void]$sb.Append("<tr><td>$(ConvertTo-HtmlSafe $r.ComputerName)</td><td>$(ConvertTo-HtmlSafe $r.Instance)</td><td>$(ConvertTo-HtmlSafe $r.Edition) <span class='pill $cls'>$clsLbl</span></td><td class='muted'>$(ConvertTo-HtmlSafe $r.Version)</td><td>$($r.PhysicalCores)</td><td><b>$($r.PerCore_Packs2)</b></td><td>$spc</td><td>$(ConvertTo-HtmlSafe $r.RecommendedModel)</td></tr>")
+            [void]$sb.Append("<tr><td>$(ConvertTo-HtmlSafe $r.ComputerName)</td><td>$(ConvertTo-HtmlSafe $r.Instance)</td><td>$(ConvertTo-HtmlSafe $r.Edition) <span class='pill $cls'>$clsLbl</span></td><td class='muted'>$(if($r.IsVirtual){'VM'}else{'Fiziksel'})</td><td>$($r.PhysicalCores)</td><td><b>$($r.PerCore_Packs2)</b></td><td>$(ConvertTo-HtmlSafe $r.RecommendedModel)</td></tr>")
         }
         [void]$sb.Append("</table>")
+        if (@($Summary.SqlByServer).Count -gt 0) {
+            [void]$sb.Append("<div class='sub' style='margin-top:8px'>Sunucu bazinda (ayni VM'deki birden fazla instance TEK lisansla kapsanir): ")
+            foreach ($g in $Summary.SqlByServer) {
+                [void]$sb.Append("<b>$(ConvertTo-HtmlSafe $g.ComputerName)</b> ($($g.InstanceCount) instance) &rarr; Server+CAL: 1 sunucu + $($Summary.SqlUsers) CAL <i>veya</i> Per-Core: $($g.PerCore_Packs2) paket. &nbsp; ")
+            }
+            [void]$sb.Append("</div>")
+        }
     }
 
     # --- RDS detail ---
@@ -986,10 +1150,8 @@ function New-HtmlReport {
             [void]$sb.Append("<tr><td>$(ConvertTo-HtmlSafe $u.ComputerName)</td><td class='muted'>$(ConvertTo-HtmlSafe $err)</td></tr>")
         }
         [void]$sb.Append("</table>")
-        [void]$sb.Append("<div class='sub'>Bu sunuculara erisilemedigi icin lisans hesabina dahil edilmediler. WinRM (5985) / RPC (135) ve guvenlik duvari ayarlarini kontrol edin.</div>")
     }
 
-    # --- Footer / sources ---
     [void]$sb.Append("<div class='foot'>Kaynaklar (Microsoft resmi): Core-based licensing models; Windows Server 2022/2025 Licensing Guides; Client Access License (CAL); RDS CAL (learn.microsoft.com); SQL Server 2022 Licensing Guide. Bu arac yalnizca envanter ve tahmin amaclidir.</div>")
     [void]$sb.Append("</div></body></html>")
 
@@ -1006,8 +1168,16 @@ function Export-FeasibilityCsv {
     if (-not $Stamp) { $Stamp = Get-Date -Format 'yyyyMMdd_HHmmss' }
     $files = @()
 
+    # Lisans ihtiyac matrisi (en onemli cikti)
+    if (@($Summary.Matrix).Count -gt 0) {
+        $pm = Join-Path $Directory "LisansMatrisi_$Stamp.csv"
+        $Summary.Matrix | Select-Object @{n='Urun';e={$_.Item}}, @{n='Adet';e={$_.Qty}}, @{n='Birim';e={$_.Unit}}, @{n='Oncelik';e={$_.Priority}}, @{n='Aciklama';e={$_.Note}} |
+            Export-Csv -Path $pm -NoTypeInformation -Encoding UTF8
+        $files += $pm
+    }
+
     $p1 = Join-Path $Directory "Servers_$Stamp.csv"
-    $Summary.ServerLicenseRows | Select-Object ComputerName, OS, Type, Sockets, PhysicalCores, LogicalCores, LicensableCores, CorePacks_2Core, RecommendedEdition, IsDC |
+    $Summary.ServerLicenseRows | Select-Object ComputerName, OS, Type, Sockets, PhysicalCores, LogicalCores, LicensableCores, PerVmCores, CorePacks_2Core, RecommendedEdition, IsDC |
         Export-Csv -Path $p1 -NoTypeInformation -Encoding UTF8
     $files += $p1
 
@@ -1018,19 +1188,20 @@ function Export-FeasibilityCsv {
         $files += $p2
     }
 
-    # Ozet CSV
     $p3 = Join-Path $Directory "Summary_$Stamp.csv"
+    $dcCore = if ($Summary.HostBased) { $Summary.HostBased.Datacenter_Cores } else { '' }
     [PSCustomObject]@{
         ToplamSunucu          = $Summary.Inventory.Domain.ServerCount
         ErisilenSunucu        = $Summary.ReachableCount
-        FizikselLisansCore_WS = $Summary.PhysicalCoreTotal
-        FizikselCorePaket2    = $Summary.PhysicalPackTotal
-        SanalCoreToplam       = $Summary.VirtualCoreTotal
+        Datacenter_Core_Host  = $dcCore
+        FizikselLisansCore    = $Summary.PhysicalCoreTotal
+        SanalvCPUToplam       = $Summary.VirtualCoreTotal
         EtkinKullanici        = $Summary.Inventory.Domain.EnabledUserCount
-        IsIstasyonu           = $Summary.Inventory.Domain.WorkstationCount
         CAL_Tavsiye           = "$($Summary.Cal.RecommendedType) x $($Summary.Cal.RecommendedCount)"
-        RDS_Mod               = $Summary.RdsMode
-        UcretliSQLInstance    = @($Summary.SqlPaid).Count
+        RDS_CAL               = $(if ($Summary.Rds) { "$($Summary.Rds.RecommendedType) x $($Summary.Rds.RecommendedCount)" } else { 'Yok' })
+        SQL_SunucuLisansi     = $Summary.SqlServerLicenses
+        SQL_CAL               = $(if ($Summary.SqlServerLicenses -gt 0) { $Summary.SqlUsers } else { 0 })
+        SQL_PerCorePaket_Alt  = $Summary.SqlPerCorePacksTotal
     } | Export-Csv -Path $p3 -NoTypeInformation -Encoding UTF8
     $files += $p3
 
@@ -1137,9 +1308,29 @@ else {
 # ----------------------------------------------------------------------
 # 3) Ozet + Rapor uret
 # ----------------------------------------------------------------------
+
+# Fiziksel host core'larini oku (verilmisse) -> host-bazli Windows hesabi
+$physicalHostCores = @()
+if ($PhysicalHostsFile) {
+    if (-not (Test-Path $PhysicalHostsFile)) { throw "Host dosyasi bulunamadi: $PhysicalHostsFile" }
+    $rawHost = @(Get-Content -Path $PhysicalHostsFile | Where-Object { $_ -and -not $_.TrimStart().StartsWith('#') })
+    $hasHeader = (($rawHost | Select-Object -First 1) -match 'PhysicalCores')
+    if ($hasHeader) {
+        $physicalHostCores = @(Import-Csv -Path $PhysicalHostsFile |
+            Where-Object { "$($_.PhysicalCores)" -match '^\s*\d+\s*$' } |
+            ForEach-Object { [int]$_.PhysicalCores })
+    } else {
+        $physicalHostCores = @($rawHost | ForEach-Object { [int]($_.Trim()) })
+    }
+    Write-Host ("[i] {0} fiziksel host okundu, toplam {1} core." -f $physicalHostCores.Count, (($physicalHostCores | Measure-Object -Sum).Sum)) -ForegroundColor Green
+}
+
 Write-Host ''
 Write-Host '[i] Lisans hesabi yapiliyor...' -ForegroundColor Green
-$summary = Get-FeasibilitySummary -Inventory $inventory
+$summary = Get-FeasibilitySummary -Inventory $inventory `
+    -PhysicalHostCores $physicalHostCores -NeedFailover (-not $NoFailover) `
+    -RdsUserCountOverride $RdsUserCount -RdsDeviceCountOverride $RdsDeviceCount `
+    -SqlUserCountOverride $SqlUserCount
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
 $csvFiles = Export-FeasibilityCsv -Summary $summary -Directory $OutputDir -Stamp $stamp
@@ -1153,19 +1344,16 @@ if (-not $NoHtml) {
 # 4) Konsol ozeti
 # ----------------------------------------------------------------------
 Write-Host ''
-Write-Host '  ---------------- LISANS IHTIYACI OZETI ----------------' -ForegroundColor Cyan
-Write-Host ("   Toplam / erisilen sunucu      : {0} / {1}" -f $inventory.Domain.ServerCount, $summary.ReachableCount)
-Write-Host ("   Fiziksel lisanslanabilir core : {0} core  ({1} x 2-core paket)" -f $summary.PhysicalCoreTotal, $summary.PhysicalPackTotal)
-Write-Host ("   Sanal sunucu core (host bazli): {0} core" -f $summary.VirtualCoreTotal)
-Write-Host ("   Windows Server CAL tavsiyesi  : {0} x {1}" -f $summary.Cal.RecommendedType, $summary.Cal.RecommendedCount)
-Write-Host ("     (etkin kullanici: {0} / is istasyonu: {1})" -f $inventory.Domain.EnabledUserCount, $inventory.Domain.WorkstationCount)
-if ($summary.Rds) {
-    Write-Host ("   RDS CAL ({0})            : {1} x {2}" -f $summary.RdsMode, $summary.Rds.RecommendedType, $summary.Rds.RecommendedCount)
-} else {
-    Write-Host '   RDS                           : Session Host bulunamadi'
+Write-Host '  ---------------- LISANS IHTIYAC MATRISI ----------------' -ForegroundColor Cyan
+foreach ($m in $summary.Matrix) {
+    $col = if ($m.Priority -eq 'Zorunlu') { 'White' } else { 'DarkGray' }
+    Write-Host ("   {0,-40} {1,5}  {2}" -f $m.Item, $m.Qty, $m.Unit) -ForegroundColor $col
 }
-Write-Host ("   Ucretli SQL instance          : {0}" -f @($summary.SqlPaid).Count)
-Write-Host '  -------------------------------------------------------' -ForegroundColor Cyan
+Write-Host '  --------------------------------------------------------' -ForegroundColor Cyan
+Write-Host ("   Toplam/erisilen sunucu: {0}/{1}    Ucretli SQL instance: {2}" -f $inventory.Domain.ServerCount, $summary.ReachableCount, @($summary.SqlPaid).Count) -ForegroundColor DarkGray
+if ($summary.HostBased) {
+    Write-Host ("   Windows host-bazli  -> Datacenter: {0} core ({1}x 2-core) | Standard(pinned): {2} core" -f $summary.HostBased.Datacenter_Cores, $summary.HostBased.Datacenter_Packs2, $summary.HostBased.Standard_Cores_Pinned) -ForegroundColor DarkGray
+}
 Write-Host ''
 Write-Host '[+] Olusturulan dosyalar:' -ForegroundColor Green
 if ($htmlPath) { Write-Host "    HTML : $htmlPath" }
